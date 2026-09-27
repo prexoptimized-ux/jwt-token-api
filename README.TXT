@@ -1,4 +1,4 @@
-#DEVELOPED BY SAMI
+#DEVELOPED BY PREX
 #USE THE ENDPOINT🇧🇩-https://localhost:8080/token?uid=youruid&password=yourpass
 ## 🚀 Features
 
