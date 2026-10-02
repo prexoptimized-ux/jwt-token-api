@@ -1,10 +1,11 @@
 # app.py
 #━━━━━━━━━━━━━━━━━━━
-#  PREX TOKEN API — FULLY DEBUGGED VERSION
-#  • Shows response body (503 debug)
-#  • Auto-filters dead domains
-#  • Multi-URL fallback
-#  • Full validation
+#  PREX TOKEN API — v4 CLEAN BUILD
+#  • India login server: loginbp.ppmainecoonghj.com
+#  • Dynamic X-Ga-Sv from /Ping response
+#  • bifrostAndroid anti-cheat pre-call
+#  • GetLoginData post-login activation
+#  • Fixed login_url scope bug (no more UnboundLocalError)
 #━━━━━━━━━━━━━━━━━━━
 
 import time
@@ -27,7 +28,7 @@ from google.protobuf.message import Message
 
 
 # ============================================================
-#  PART 1 — FreeFire_pb2 (inlined)
+#  FreeFire proto definitions
 # ============================================================
 
 _runtime_version.ValidateProtobufRuntimeVersion(
@@ -84,7 +85,7 @@ LoginRes = _globals["LoginRes"]
 
 
 # ============================================================
-#  PART 2 — Settings
+#  Settings
 # ============================================================
 
 MAIN_KEY = base64.b64decode("WWcmdGMlREV1aDYlWmNeOA==")
@@ -92,22 +93,26 @@ MAIN_IV = base64.b64decode("Nm95WkRyMjJFM3ljaGpNJQ==")
 RELEASEVERSION = "OB55"
 USERAGENT = "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)"
 
-# ✅ Only working domains (auto-filtered at startup)
+# Real India login servers (from mitmproxy capture)
 LOGIN_URLS = [
+    "https://loginbp.ppmainecoonghj.com/",
+    "https://vodka.freefireind.in/",
+    "https://loginbp.common.ggbluefox.com/",
     "https://loginbp.ggpolarbear.com/",
     "https://loginbp.ggblueshark.com/",
     "https://loginbp.ggwhitehawk.com/",
-    "https://loginbp.ggbluefox.com/",
 ]
 
-# Fast HTTP client
+BIFROST_URL = "https://gin.freefireind.in/bifrostAndroid"
+CLIENT_BASE = "https://client.ind.freefiremobile.com/"
+
 HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
 HTTP_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _http_client = httpx.Client(limits=HTTP_LIMITS, timeout=HTTP_TIMEOUT)
 
 
 # ============================================================
-#  PART 3 — Flask App
+#  Flask
 # ============================================================
 
 app = Flask(__name__)
@@ -115,7 +120,7 @@ CORS(app)
 
 
 # ============================================================
-#  PART 4 — Helpers
+#  Helpers
 # ============================================================
 
 def pad(text: bytes) -> bytes:
@@ -171,8 +176,7 @@ def extract_login_res(raw: bytes) -> dict:
                 break
 
     raise Exception(
-        f"Could not parse LoginRes. "
-        f"Length: {len(raw)} bytes. "
+        f"Could not parse LoginRes. Length: {len(raw)} bytes. "
         f"Hex: {raw[:100].hex()}"
     )
 
@@ -197,37 +201,92 @@ def get_access_token(account: str):
 
 
 def filter_valid_urls(urls):
-    """Remove URLs that can't resolve via DNS"""
     valid = []
     for url in urls:
         host = url.replace("https://", "").replace("http://", "").rstrip("/")
         try:
             socket.gethostbyname(host)
             valid.append(url)
-            print(f"✅ {host} — valid")
+            print(f"  [OK] {host}")
         except Exception:
-            print(f"❌ {host} — removed (DNS fail)")
+            print(f"  [--] {host} (DNS fail)")
     return valid
 
+
+def _build_headers(x_ga_sv: str = "1789534056") -> dict:
+    return {
+        "User-Agent": USERAGENT,
+        "Accept": "*/*",
+        "Accept-Encoding": "deflate, gzip",
+        "X-Ga-Sv": x_ga_sv,
+        "Authorization": "Bearer",
+        "X-Ga": "v1 1",
+        "Releaseversion": RELEASEVERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.12f1",
+        "PlAy_VeR": "1.132.9",
+        "Ob_VeR": RELEASEVERSION,
+    }
+
+
+def _do_ping(login_url: str, headers: dict) -> dict:
+    try:
+        resp = _http_client.post(f"{login_url}Ping", data=b"", headers=headers)
+        print(f"  Ping Status: {resp.status_code}")
+        if resp.status_code == 200 and len(resp.content) > 0:
+            try:
+                return resp.json()
+            except Exception:
+                return {}
+    except Exception as e:
+        print(f"  Ping failed: {e}")
+    return {}
+
+
+def _do_bifrost(headers: dict) -> bool:
+    try:
+        print(f"  [Anti-cheat] bifrostAndroid...")
+        resp = _http_client.post(BIFROST_URL, data=b"", headers=headers)
+        print(f"  bifrostAndroid Status: {resp.status_code}")
+        return resp.status_code in (200, 900)
+    except Exception as e:
+        print(f"  bifrostAndroid failed: {e}")
+    return False
+
+
+def _do_get_login_data(token: str, headers: dict) -> bool:
+    try:
+        print(f"  [Activation] GetLoginData...")
+        resp = _http_client.post(f"{CLIENT_BASE}GetLoginData", data=b"", headers=headers)
+        print(f"  GetLoginData Status: {resp.status_code}")
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"  GetLoginData failed: {e}")
+    return False
+
+
+# ============================================================
+#  Core: generate token
+# ============================================================
 
 def generate_jwt_token(uid: str, password: str):
     start_time = time.time()
 
-    # ============ STEP 1: OAuth ============
     print(f"\n{'='*60}")
-    print(f"🔍 TOKEN GENERATION START")
+    print(f"  TOKEN GENERATION START")
     print(f"{'='*60}")
-    print(f"📌 UID: {uid}")
+    print(f"  UID: {uid}")
 
+    # --- Step 1: OAuth ---
     token_val, open_id = get_access_token(f"uid={uid}&password={password}")
     if token_val == "0" or open_id == "0":
-        raise Exception("Invalid UID or Password — access token not received")
+        raise Exception("Invalid UID or Password")
 
-    print(f"✅ [1/5] OAuth OK")
-    print(f"   access_token: {token_val[:25]}...")
-    print(f"   open_id: {open_id}")
+    print(f"  [1/6] OAuth OK")
+    print(f"    access_token: {token_val[:25]}...")
+    print(f"    open_id: {open_id}")
 
-    # ============ STEP 2: ProtoBuf ============
+    # --- Step 2: ProtoBuf encrypt ---
     body = json.dumps({
         "open_id": open_id,
         "open_id_type": "4",
@@ -236,102 +295,116 @@ def generate_jwt_token(uid: str, password: str):
     })
     proto_bytes = json_to_proto(body, LoginReq())
     payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, proto_bytes)
+    print(f"  [2/6] ProtoBuf encrypted: {len(payload)} bytes")
 
-    print(f"✅ [2/5] ProtoBuf encrypted: {len(payload)} bytes")
+    # --- Step 3: Try each login URL ---
+    urls_to_try = list(LOGIN_URLS) if LOGIN_URLS else []
+    if not urls_to_try:
+        raise Exception("No login URLs configured")
 
-    # ============ STEP 3: Headers ============
-    headers = {
-        "User-Agent": USERAGENT,
-        "Accept": "*/*",
-        "Accept-Encoding": "deflate, gzip",
-        "X-Ga-Sv": "1789534056",
-        "Authorization": "Bearer",
-        "X-Ga": "v1 1",
-        "Releaseversion": RELEASEVERSION,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-Unity-Version": "2018.4.12f1",
-        "PlAy_VeR": "1.132.1",
-        "Ob_VeR": RELEASEVERSION,
-    }
+    print(f"\n  URLs to try: {len(urls_to_try)}")
 
-    # ============ STEP 4: MajorLogin ============
     last_error = None
     successful_url = None
     final_token = ""
     final_uid = ""
 
-    for i, login_url in enumerate(LOGIN_URLS, 1):
+    for i, login_url in enumerate(urls_to_try, 1):
         try:
+            print(f"\n  [3/6] Trying URL #{i}: {login_url}")
+
+            # Ping + dynamic X-Ga-Sv
+            base_headers = _build_headers()
+            ping_data = _do_ping(login_url, base_headers)
+
+            dynamic_sv = (
+                ping_data.get("X-Ga-Sv")
+                or ping_data.get("x_ga_sv")
+                or ping_data.get("xGaSv")
+            )
+            if dynamic_sv:
+                base_headers["X-Ga-Sv"] = str(dynamic_sv)
+                print(f"    Dynamic X-Ga-Sv: {dynamic_sv}")
+            else:
+                print(f"    No dynamic X-Ga-Sv, using default")
+
+            time.sleep(0.3)
+
+            # Anti-cheat
+            _do_bifrost(base_headers)
+            time.sleep(0.3)
+
+            # MajorLogin
             url = f"{login_url}MajorLogin"
-            print(f"\n🔍 [3/5] Trying URL #{i}: {login_url}")
+            resp = _http_client.post(url, data=payload, headers=base_headers)
 
-            resp = _http_client.post(url, data=payload, headers=headers)
+            print(f"\n    MajorLogin Status: {resp.status_code}")
+            print(f"    Response Length: {len(resp.content)} bytes")
 
-            print(f"   HTTP Status: {resp.status_code}")
-            print(f"   Response Length: {len(resp.content)} bytes")
-
-            # ✅ ALWAYS SHOW RESPONSE BODY (for debug)
             if len(resp.content) < 500:
                 try:
-                    body_text = resp.text
-                    print(f"   📄 Body: {body_text[:400]}")
-                except:
-                    print(f"   📄 Body (hex): {resp.content[:200].hex()}")
+                    print(f"    Body: {resp.text[:400]}")
+                except Exception:
+                    print(f"    Body (hex): {resp.content[:200].hex()}")
 
             if resp.status_code != 200:
                 last_error = f"HTTP {resp.status_code}"
-                print(f"   ❌ Failed: {last_error}")
+                print(f"    Failed: {last_error}")
                 continue
 
             if len(resp.content) < 10:
                 last_error = f"Empty response ({len(resp.content)} bytes)"
-                print(f"   ❌ Failed: {last_error}")
+                print(f"    Failed: {last_error}")
                 continue
 
-            # Try parse
             try:
                 msg = extract_login_res(resp.content)
             except Exception as e:
                 last_error = f"Parse failed: {str(e)[:100]}"
-                print(f"   ❌ Parse error: {e}")
+                print(f"    Parse error: {e}")
                 continue
 
             token = msg.get("token", "")
             real_uid = str(msg.get("accountId", ""))
 
-            print(f"   Parsed accountId: {real_uid}")
-            print(f"   Parsed token length: {len(token)}")
+            print(f"    Parsed accountId: {real_uid}")
+            print(f"    Parsed token length: {len(token)}")
 
             if not token or len(token) < 50:
                 last_error = f"Invalid token length: {len(token)}"
-                print(f"   ❌ Failed: {last_error}")
+                print(f"    Failed: {last_error}")
                 continue
 
             if not real_uid or real_uid == "1":
                 last_error = f"Invalid real_uid: {real_uid}"
-                print(f"   ❌ Failed: {last_error}")
+                print(f"    Failed: {last_error}")
                 continue
 
-            # ✅ SUCCESS
+            # SUCCESS
             successful_url = login_url
             final_token = token
             final_uid = real_uid
-            print(f"   ✅ SUCCESS with {login_url}")
+            print(f"    SUCCESS with {login_url}")
+
+            # Activate
+            activate_headers = dict(base_headers)
+            activate_headers["Authorization"] = f"Bearer {token}"
+            _do_get_login_data(token, activate_headers)
             break
 
         except Exception as e:
             last_error = str(e)
-            print(f"   ❌ Exception: {e}")
+            print(f"    Exception: {e}")
             continue
 
-    # ============ STEP 5: Check ============
+    # --- Step 4: Check ---
     if not successful_url:
-        print(f"\n❌ [4/5] ALL LOGIN URLS FAILED")
-        print(f"   Last error: {last_error}")
+        print(f"\n  [4/6] ALL LOGIN URLS FAILED")
+        print(f"    Last error: {last_error}")
         print(f"{'='*60}\n")
         raise Exception(f"All login URLs failed. Last error: {last_error}")
 
-    print(f"\n✅ [4/5] MajorLogin OK via {successful_url}")
+    print(f"\n  [4/6] MajorLogin OK via {successful_url}")
 
     elapsed = time.time() - start_time
 
@@ -344,16 +417,16 @@ def generate_jwt_token(uid: str, password: str):
         "token": final_token,
     }
 
-    print(f"✅ [5/5] DONE in {elapsed:.2f}s")
-    print(f"   Real UID: {final_uid}")
-    print(f"   Token length: {len(final_token)}")
+    print(f"  [6/6] DONE in {elapsed:.2f}s")
+    print(f"    Real UID: {final_uid}")
+    print(f"    Token length: {len(final_token)}")
     print(f"{'='*60}\n")
 
     return result
 
 
 # ============================================================
-#  PART 5 — Routes
+#  Routes
 # ============================================================
 
 @app.route("/", methods=["GET"])
@@ -380,7 +453,7 @@ def get_jwt_token():
         token_data = generate_jwt_token(uid, password)
         return jsonify(token_data), 200
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"  ERROR: {e}")
         return jsonify({
             "status": "error",
             "error": f"Failed to generate token: {str(e)}"
@@ -388,25 +461,25 @@ def get_jwt_token():
 
 
 # ============================================================
-#  ENTRY POINT
+#  Entry point
 # ============================================================
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 PREX TOKEN API STARTING")
+    print("PREX TOKEN API STARTING (v4)")
     print("=" * 60)
-    print(f"📌 Release Version: {RELEASEVERSION}")
-    print(f"📌 Testing login URLs...")
+    print(f"Release Version: {RELEASEVERSION}")
+    print(f"Testing login URLs...")
 
     LOGIN_URLS = filter_valid_urls(LOGIN_URLS)
 
     if not LOGIN_URLS:
-        print("❌ No valid login URLs found! Check your internet.")
+        print("No valid login URLs found!")
         exit(1)
 
-    print(f"\n✅ {len(LOGIN_URLS)} valid URLs loaded")
+    print(f"\n{len(LOGIN_URLS)} valid URLs loaded")
     print("=" * 60)
-    print("✅ Server running on http://0.0.0.0:5002")
+    print("Server running on http://0.0.0.0:5002")
     print("=" * 60)
 
     app.run(host="0.0.0.0", port=5002, debug=False)
